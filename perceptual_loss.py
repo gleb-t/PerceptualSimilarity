@@ -1,3 +1,4 @@
+import datetime
 import itertools
 import math
 import os
@@ -124,7 +125,9 @@ def main():
 
     dataSize = 128
     batchSize = 8
-    imageSize = 64
+    imageSize = 32
+
+    discCheckpointPath = r'E:\projects\visus\PyTorch-GAN\implementations\dcgan\checkpoints\2020_07_10_15_53_34\disc_step4800.pth'
 
     gpu = torch.device('cuda')
 
@@ -166,20 +169,27 @@ def main():
     lossModel = models.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True).to(gpu)
     lossBce = torch.nn.BCELoss()
 
-    discriminator = Discriminator(imageSize, 3).to(gpu)
+    discriminator = Discriminator(imageSize, 3)
+    discriminator.load_state_dict(torch.load(discCheckpointPath))
+    discriminator = discriminator.to(gpu)
 
-    optimizerImages = torch.optim.Adam([images, scale], lr=1e-3, betas=(0.9, 0.999))
+    # todo init properly, if training
+    # discriminator.apply(weights_init_normal)
+
+    optimizerImages = torch.optim.Adam([images, scale], lr=1e-2, betas=(0.9, 0.999))
     optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.9, 0.999))
 
     import matplotlib.pyplot as plt
-    plt.ion()
     fig, axes = plt.subplots(nrows=2, ncols=batchSize // 2)
 
     fig2 = plt.figure()
     ax2 = fig2.add_subplot(1, 1, 1)
 
+    outPath = os.path.join('images', datetime.datetime.today().strftime('%Y_%m_%d_%H_%M_%S'))
+    os.makedirs(outPath)
+
     catIter = iter(catLoader)
-    for i in range(10000):
+    for batchIndex in range(10000):
 
         realImageBatch, _ = next(catIter)  # type: Tuple(torch.Tensor, Any)
         realImageBatch = realImageBatch.to(gpu)
@@ -196,30 +206,35 @@ def main():
         distPredMat = distPred.reshape((batchSize, batchSize))
 
         lossDist = torch.sum((distanceBatch - distPredMat * scale) ** 2)  # MSE
-        lossRealness = lossBce(discriminator(imageBatch.detach()), torch.ones(imageBatch.shape[0], 1, device=gpu))
-        lossImages = lossDist + 100.0 * lossRealness
+        discPred = discriminator(imageBatch)
+        lossRealness = lossBce(discPred, torch.ones(imageBatch.shape[0], 1, device=gpu))
+        lossImages = lossDist + 0.0 * lossRealness  # todo
+        # lossImages = lossRealness  # todo
 
-        lossDiscReal = lossBce(discriminator(realImageBatch), torch.ones(realImageBatch.shape[0], 1, device=gpu))
-        lossDiscFake = lossBce(discriminator(imageBatch.detach()), torch.zeros(imageBatch.shape[0], 1, device=gpu))
-        lossDisc = (lossDiscFake + lossDiscReal) / 2
+        # lossDiscReal = lossBce(discriminator(realImageBatch), torch.ones(realImageBatch.shape[0], 1, device=gpu))
+        # lossDiscFake = lossBce(discriminator(imageBatch.detach()), torch.zeros(imageBatch.shape[0], 1, device=gpu))
+        # lossDisc = (lossDiscFake + lossDiscReal) / 2
+        lossDisc = torch.tensor(0)
 
         optimizerImages.zero_grad()
         lossImages.backward()
         optimizerImages.step()
 
-        optimizerDisc.zero_grad()
-        lossDisc.backward()
-        optimizerDisc.step()
+        # optimizerDisc.zero_grad()
+        # lossDisc.backward()
+        # optimizerDisc.step()
 
         with torch.no_grad():
             # todo  We're clamping all the images every batch, can we do clamp only the ones updated?
-            images = torch.clamp(images, 0, 1)
+            # images = torch.clamp(images, 0, 1)  # For some reason this was making the training worse.
+            images.data = torch.clamp(images.data, 0, 1)
 
-        if i % 100 == 0:
+        if batchIndex % 100 == 0:
             msg = 'iter {}, loss images {:.3f}, loss dist {:.3f}, loss real {:.3f}, loss disc {:.3f}, scale: {:.3f}'.format(
-                i, lossImages.item(), lossDist.item(), lossRealness.item(), lossDisc.item(), scale.item()
+                batchIndex, lossImages.item(), lossDist.item(), lossRealness.item(), lossDisc.item(), scale.item()
             )
             print(msg)
+            # print(discPred.tolist())
             imageBatchCpu = imageBatch.cpu().data.numpy().transpose(0, 2, 3, 1)
             for i, ax in enumerate(axes.flatten()):
                 ax.imshow(imageBatchCpu[i])
@@ -228,7 +243,8 @@ def main():
             imagesAllCpu = images.cpu().data.numpy().transpose(0, 2, 3, 1)
             plot_image_scatter(ax2, randomPoints, imagesAllCpu, downscaleRatio=2)
 
-            plt.pause(5e-2)
+            fig.savefig(os.path.join(outPath, 'batch_{}.png'.format(batchIndex)))
+            fig2.savefig(os.path.join(outPath, 'scatter_{}.png'.format(batchIndex)))
             # plt.imsave('imgs_saved/%04d.jpg'%i,pred_img)
 
 

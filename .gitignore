@@ -1,6 +1,7 @@
 *.pyc
 
 checkpoints/*
+images
 
 venv
 .idea
