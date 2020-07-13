@@ -17,9 +17,11 @@ from torch.utils.data import Dataset, DataLoader, Sampler
 from PIL import Image
 import skimage.transform
 
-import models
-
 from typing import *
+
+
+import models
+from Discriminator import Discriminator
 
 
 class CatDataset(Dataset):
@@ -62,34 +64,6 @@ class InfiniteSampler(Sampler):
             yield from torch.randperm(self.dataset_size, generator=g)
 
 
-class Discriminator(nn.Module):
-    def __init__(self, img_size: int, channels: int = 3):
-        super(Discriminator, self).__init__()
-
-        def discriminator_block(in_filters, out_filters, bn=True):
-            block = [nn.Conv2d(in_filters, out_filters, 3, 2, 1), nn.LeakyReLU(0.2, inplace=True), nn.Dropout2d(0.25)]
-            if bn:
-                block.append(nn.BatchNorm2d(out_filters, 0.8))
-            return block
-
-        self.model = nn.Sequential(
-            *discriminator_block(channels, 16, bn=False),
-            *discriminator_block(16, 32),
-            *discriminator_block(32, 64),
-            *discriminator_block(64, 128),
-        )
-
-        # The height and width of downsampled image
-        ds_size = img_size // 2 ** 4
-        self.adv_layer = nn.Sequential(nn.Linear(128 * ds_size ** 2, 1), nn.Sigmoid())
-
-    def forward(self, img):
-        out = self.model(img)
-        out = out.view(out.shape[0], -1)
-        validity = self.adv_layer(out)
-
-        return validity
-
 
 def plot_image_scatter(ax, data, images, downscaleRatio: Optional[int] = None):
     from matplotlib.offsetbox import AnnotationBbox, OffsetImage
@@ -125,9 +99,12 @@ def main():
 
     dataSize = 128
     batchSize = 8
-    imageSize = 32
+    # imageSize = 32
+    imageSize = 64
 
-    discCheckpointPath = r'E:\projects\visus\PyTorch-GAN\implementations\dcgan\checkpoints\2020_07_10_15_53_34\disc_step4800.pth'
+    # discCheckpointPath = r'E:\projects\visus\PyTorch-GAN\implementations\dcgan\checkpoints\2020_07_10_15_53_34\disc_step4800.pth'
+    discCheckpointPath = r'E:\projects\visus\pytorch-examples\dcgan\out\netD_epoch_24.pth'
+    # discCheckpointPath = None
 
     gpu = torch.device('cuda')
 
@@ -169,15 +146,18 @@ def main():
     lossModel = models.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True).to(gpu)
     lossBce = torch.nn.BCELoss()
 
-    discriminator = Discriminator(imageSize, 3)
-    discriminator.load_state_dict(torch.load(discCheckpointPath))
+    # discriminator = Discriminator(imageSize, 3)
+    discriminator = Discriminator(3, 64, 1)
+    if discCheckpointPath:
+        discriminator.load_state_dict(torch.load(discCheckpointPath))
     discriminator = discriminator.to(gpu)
 
     # todo init properly, if training
     # discriminator.apply(weights_init_normal)
 
     optimizerImages = torch.optim.Adam([images, scale], lr=1e-2, betas=(0.9, 0.999))
-    optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.9, 0.999))
+    # optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.9, 0.999))
+    optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
 
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(nrows=2, ncols=batchSize // 2)
@@ -208,21 +188,21 @@ def main():
         lossDist = torch.sum((distanceBatch - distPredMat * scale) ** 2)  # MSE
         discPred = discriminator(imageBatch)
         lossRealness = lossBce(discPred, torch.ones(imageBatch.shape[0], 1, device=gpu))
-        lossImages = lossDist + 0.0 * lossRealness  # todo
+        lossImages = lossDist + 100.0 * lossRealness  # todo
         # lossImages = lossRealness  # todo
-
-        # lossDiscReal = lossBce(discriminator(realImageBatch), torch.ones(realImageBatch.shape[0], 1, device=gpu))
-        # lossDiscFake = lossBce(discriminator(imageBatch.detach()), torch.zeros(imageBatch.shape[0], 1, device=gpu))
-        # lossDisc = (lossDiscFake + lossDiscReal) / 2
-        lossDisc = torch.tensor(0)
 
         optimizerImages.zero_grad()
         lossImages.backward()
         optimizerImages.step()
 
-        # optimizerDisc.zero_grad()
-        # lossDisc.backward()
-        # optimizerDisc.step()
+        lossDiscReal = lossBce(discriminator(realImageBatch), torch.ones(realImageBatch.shape[0], 1, device=gpu))
+        lossDiscFake = lossBce(discriminator(imageBatch.detach()), torch.zeros(imageBatch.shape[0], 1, device=gpu))
+        lossDisc = (lossDiscFake + lossDiscReal) / 2
+        # lossDisc = torch.tensor(0)
+
+        optimizerDisc.zero_grad()
+        lossDisc.backward()
+        optimizerDisc.step()
 
         with torch.no_grad():
             # todo  We're clamping all the images every batch, can we do clamp only the ones updated?
