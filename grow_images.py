@@ -21,7 +21,7 @@ from typing import *
 
 
 import models
-from Discriminator import Discriminator
+from dcgan import Discriminator
 
 
 class CatDataset(Dataset):
@@ -101,15 +101,17 @@ def main():
     batchSize = 8
     # imageSize = 32
     imageSize = 64
+    initWithCats = True
 
     # discCheckpointPath = r'E:\projects\visus\PyTorch-GAN\implementations\dcgan\checkpoints\2020_07_10_15_53_34\disc_step4800.pth'
-    discCheckpointPath = r'E:\projects\visus\pytorch-examples\dcgan\out\netD_epoch_24.pth'
-    # discCheckpointPath = None
+    # discCheckpointPath = r'E:\projects\visus\pytorch-examples\dcgan\out\netD_epoch_24.pth'
+    discCheckpointPath = None
 
     gpu = torch.device('cuda')
 
+    imageRootPath = r'E:\data\cat-vs-dog\cat'
     catDataset = CatDataset(
-        imageSubdirPath=r'E:\data\cat-vs-dog\cat',
+        imageSubdirPath=imageRootPath,
         transform=transforms.Compose(
             [
                 transforms.Resize((imageSize, imageSize)),
@@ -134,11 +136,17 @@ def main():
     randomPoints = generate_points(dataSize)
     distancesCpu = scipy.spatial.distance_matrix(randomPoints, randomPoints, p=2)
 
-    # catImagePath = os.path.expandvars(r'${DEV_METAPHOR_DATA_PATH}/cats/cat.247.jpg')
-    # catImage = skimage.transform.resize(imageio.imread(catImagePath), (64, 64), 1).transpose(2, 0, 1)
+    if initWithCats:
+        imagePaths = random.choices(glob.glob(os.path.join(imageRootPath, '*')), k=dataSize)
+        catImages = []
+        for p in imagePaths:
+            image = skimage.transform.resize(imageio.imread(p), (imageSize, imageSize), 1).transpose(2, 0, 1)
+            catImages.append(image)
 
-    imagesInitCpu = np.clip(np.random.normal(0.5, 0.5 / 3, (dataSize, 3, imageSize, imageSize)), 0, 1)
-    # imagesInitCpu = np.clip(np.tile(catImage, (dataSize, 1, 1, 1)) + np.random.normal(0., 0.5 / 6, (dataSize, 3, 64, 64)), 0, 1)
+        imagesInitCpu = np.asarray(catImages)
+    else:
+        imagesInitCpu = np.clip(np.random.normal(0.5, 0.5 / 3, (dataSize, 3, imageSize, imageSize)), 0, 1)
+
     images = torch.tensor(imagesInitCpu, requires_grad=True, dtype=torch.float32, device=gpu)
 
     scale = torch.tensor(1.0, requires_grad=True, dtype=torch.float32, device=gpu)
@@ -150,12 +158,11 @@ def main():
     discriminator = Discriminator(3, 64, 1)
     if discCheckpointPath:
         discriminator.load_state_dict(torch.load(discCheckpointPath))
+    else:
+        discriminator.init_params()
     discriminator = discriminator.to(gpu)
 
-    # todo init properly, if training
-    # discriminator.apply(weights_init_normal)
-
-    optimizerImages = torch.optim.Adam([images, scale], lr=1e-2, betas=(0.9, 0.999))
+    optimizerImages = torch.optim.Adam([images, scale], lr=1e-3, betas=(0.9, 0.999))
     # optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.9, 0.999))
     optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
 
