@@ -2,6 +2,7 @@
 
 checkpoints/*
 images
+runs
 
 venv
 .idea
