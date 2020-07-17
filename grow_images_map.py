@@ -19,6 +19,7 @@ import umap
 from torch.utils.data import Dataset, DataLoader, Sampler
 from PIL import Image
 import skimage.transform
+import matplotlib.pyplot as plt
 
 from typing import *
 
@@ -89,7 +90,6 @@ class InfiniteSampler(Sampler):
             yield from torch.randperm(self.dataset_size, generator=g)
 
 
-
 def plot_image_scatter(ax, data, images, downscaleRatio: Optional[int] = None):
     from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 
@@ -105,20 +105,6 @@ def plot_image_scatter(ax, data, images, downscaleRatio: Optional[int] = None):
         ax.add_artist(ab)
 
 
-def generate_points(dataSize: int):
-    modeNumber = 3
-    modeRadius = 2.0
-    std = 1.0 / 2
-    means = []
-    for i in range(modeNumber):
-        phase = i / modeNumber * 2 * math.pi
-        means.append([math.cos(phase) * modeRadius, math.sin(phase) * modeRadius])
-
-    choices = [np.random.multivariate_normal(m, np.identity(2) * std, dataSize) for m in means]
-    points = np.asarray([choices[random.randrange(modeNumber)][i] for i in range(dataSize)])
-
-    return points
-
 
 def l2_sqr_dist_matrix(x: torch.Tensor) -> torch.Tensor:
     gram = torch.mm(x, x.T)
@@ -129,35 +115,17 @@ def l2_sqr_dist_matrix(x: torch.Tensor) -> torch.Tensor:
 
 def main():
 
-    dataSize = 128
+    dataSize = 64
     batchSize = 8
     # imageSize = 32
     imageSize = 64
+    nz = 100
 
     # discCheckpointPath = r'E:\projects\visus\PyTorch-GAN\implementations\dcgan\checkpoints\2020_07_10_15_53_34\disc_step4800.pth'
-    # discCheckpointPath = r'E:\projects\visus\pytorch-examples\dcgan\out\netD_epoch_24.pth'
-    discCheckpointPath = None
+    discCheckpointPath = r'E:\projects\visus\pytorch-examples\dcgan\out\netD_epoch_24.pth'
+    genCheckpointPath = r'E:\projects\visus\pytorch-examples\dcgan\out\netG_epoch_24.pth'
 
     gpu = torch.device('cuda')
-
-    # imageDataset = CatDataset(
-    #     imageSubdirPath=r'E:\data\cat-vs-dog\cat',
-    #     transform=transforms.Compose(
-    #         [
-    #             transforms.Resize((imageSize, imageSize)),
-    #             transforms.ToTensor(),
-    #             transforms.Normalize([0.5], [0.5])
-    #         ]
-    #     )
-    # )
-
-    imageDataset = datasets.CIFAR10(root=r'e:\data\images\cifar10', download=True,
-                                    transform=transforms.Compose([
-                                        transforms.Resize((imageSize, imageSize)),
-                                        transforms.ToTensor(),
-                                        # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-                                        transforms.Normalize([0.5], [0.5]),
-                               ]))
 
     # For now we normalize the vectors to have norm 1, but don't make sure
     # that the data has certain mean/std.
@@ -165,56 +133,40 @@ def main():
         jsonPath=r'E:\out\scripts\metaphor-vis\authors-all.json'
     )
 
-    imageLoader = DataLoader(imageDataset, batch_size=batchSize, sampler=InfiniteSampler(imageDataset))
-    pointLoader = DataLoader(pointDataset, batch_size=batchSize, sampler=InfiniteSampler(pointDataset))
+    # Take top N points.
+    points = np.asarray([pointDataset[i][0] for i in range(dataSize)])
+    distPointsCpu = scipy.spatial.distance_matrix(points, points, p=2)
 
-    # Generate a random distance matrix.
-    # # Make a matrix with positive values.
-    # distancesCpu = np.clip(np.random.normal(0.5, 1.0 / 3, (dataSize, dataSize)), 0, 1)
-    # # Make it symmetrical.
-    # distancesCpu = np.matmul(distancesCpu, distancesCpu.T)
-
-    # Generate random points and compute distances, guaranteeing that the triangle rule isn't broken.
-    # randomPoints = generate_points(dataSize)
-    # distancesCpu = scipy.spatial.distance_matrix(randomPoints, randomPoints, p=2)
-
-
-    # catImagePath = os.path.expandvars(r'${DEV_METAPHOR_DATA_PATH}/cats/cat.247.jpg')
-    # catImage = skimage.transform.resize(imageio.imread(catImagePath), (64, 64), 1).transpose(2, 0, 1)
-
-    # imagesInitCpu = np.clip(np.random.normal(0.5, 0.5 / 3, (dataSize, 3, imageSize, imageSize)), 0, 1)
-    # imagesInitCpu = np.clip(np.tile(catImage, (dataSize, 1, 1, 1)) + np.random.normal(0., 0.5 / 6, (dataSize, 3, 64, 64)), 0, 1)
-    # images = torch.tensor(imagesInitCpu, requires_grad=True, dtype=torch.float32, device=gpu)
+    latents = torch.tensor(np.random.normal(0.0, 1.0, (dataSize, nz)),
+                           requires_grad=True, dtype=torch.float32, device=gpu)
 
     scale = torch.tensor(4.0, requires_grad=True, dtype=torch.float32, device=gpu)
 
     lossModel = models.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True).to(gpu)
     bceLoss = torch.nn.BCELoss()
 
-    # discriminator = Discriminator(imageSize, 3)
     discriminator = Discriminator(3, 64, 1)
     if discCheckpointPath:
         discriminator.load_state_dict(torch.load(discCheckpointPath))
     else:
         discriminator.init_params()
-
     discriminator = discriminator.to(gpu)
 
-    generator = Generator(nz=pointDataset[0][0].shape[0], ngf=64)
-    generator.init_params()
+    generator = Generator(nz=nz, ngf=64)
+    if genCheckpointPath:
+        generator.load_state_dict(torch.load(genCheckpointPath))
+    else:
+        generator.init_params()
     generator = generator.to(gpu)
 
-    # todo init properly, if training
-    # discriminator.apply(weights_init_normal)
-
     # optimizerImages = torch.optim.Adam([images, scale], lr=1e-2, betas=(0.9, 0.999))
-    optimizerScale = torch.optim.Adam([scale], lr=0.001)
-    optimizerGen = torch.optim.Adam(generator.parameters(), lr=0.0002, betas=(0.5, 0.999))
+    # optimizerScale = torch.optim.Adam([scale], lr=0.001)
+    # optimizerGen = torch.optim.Adam(generator.parameters(), lr=0.0002, betas=(0.5, 0.999))
     # optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.9, 0.999))
-    optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
+    # optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
+    optimizerLatents = torch.optim.Adam([latents], lr=1e-3, betas=(0.9, 0.999))
 
-    import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(nrows=2 * 2, ncols=batchSize // 2)
+    fig, axes = plt.subplots(nrows=2, ncols=batchSize // 2)
 
     fig2 = plt.figure()
     ax2 = fig2.add_subplot(1, 1, 1)
@@ -222,49 +174,36 @@ def main():
     outPath = os.path.join('runs', datetime.datetime.today().strftime('%Y_%m_%d_%H_%M_%S'))
     os.makedirs(outPath)
 
-    imageIter = iter(imageLoader)
-    pointIter = iter(pointLoader)
     for batchIndex in range(10000):
 
-        imageBatchReal, _ = next(imageIter)  # type: Tuple(torch.Tensor, Any)
-        imageBatchReal = imageBatchReal.to(gpu)
-        # imageBatchReal = torch.tensor(realImageBatchCpu, device=gpu)
-
         # noinspection PyTypeChecker
-        # randomIndices = np.random.randint(0, dataSize, batchSize).tolist()  # type: List[int]
+        randomIndices = np.random.randint(0, dataSize, batchSize).tolist()  # type: List[int]
         # # randomIndices = list(range(dataSize))  # type: List[int]
-        # distanceBatch = torch.tensor(distancesCpu[randomIndices, :][:, randomIndices], dtype=torch.float32, device=gpu)
-        # imageBatchFake = images[randomIndices].contiguous()
-        vectorBatch, _ = next(pointIter)
-        vectorBatch = vectorBatch.to(gpu)
-        distanceBatch = l2_sqr_dist_matrix(vectorBatch)  # In-batch vector distances.
+        distTarget = torch.tensor(distPointsCpu[randomIndices, :][:, randomIndices], dtype=torch.float32, device=gpu)
+        latentsBatch = latents[randomIndices]
 
-        imageBatchFake = generator(vectorBatch[:, :, None, None].float())
+        imageBatchFake = generator(latentsBatch[:, :, None, None].float())
 
         # todo It's possible to compute this more efficiently, but would require re-implementing lpips.
         distImages = lossModel.forward(imageBatchFake.repeat(repeats=(batchSize, 1, 1, 1)).contiguous(),
                                        imageBatchFake.repeat_interleave(repeats=batchSize, dim=0).contiguous(), normalize=True)
-        distPredMat = distImages.reshape((batchSize, batchSize))
+        distPred = distImages.reshape((batchSize, batchSize))
 
-        lossDist = torch.sum((distanceBatch - distPredMat * scale) ** 2)  # MSE
-        discPred = discriminator(imageBatchFake)
-        lossRealness = bceLoss(discPred, torch.ones(imageBatchFake.shape[0], device=gpu))
-        lossGen = lossDist + 1.0 * lossRealness
+        lossDist = torch.sum((distTarget - distPred * scale) ** 2)  # MSE
+        # discPred = discriminator(imageBatchFake)
+        # lossRealness = bceLoss(discPred, torch.ones(imageBatchFake.shape[0], device=gpu))
+        # lossGen = lossDist + 1.0 * lossRealness
+        lossLatents = lossDist
 
-        optimizerGen.zero_grad()
-        optimizerScale.zero_grad()
-        lossGen.backward()
-        optimizerGen.step()
-        optimizerScale.step()
+        # optimizerGen.zero_grad()
+        # optimizerScale.zero_grad()
+        # lossGen.backward()
+        # optimizerGen.step()
+        # optimizerScale.step()
 
-        lossDiscReal = bceLoss(discriminator(imageBatchReal), torch.ones(imageBatchReal.shape[0], device=gpu))
-        lossDiscFake = bceLoss(discriminator(imageBatchFake.detach()), torch.zeros(imageBatchFake.shape[0], device=gpu))
-        lossDisc = (lossDiscFake + lossDiscReal) / 2
-        # lossDisc = torch.tensor(0)
-
-        optimizerDisc.zero_grad()
-        lossDisc.backward()
-        optimizerDisc.step()
+        optimizerLatents.zero_grad()
+        lossLatents.backward()
+        optimizerLatents.step()
 
         # with torch.no_grad():
         #     # todo  We're clamping all the images every batch, can we clamp only the ones updated?
@@ -272,9 +211,7 @@ def main():
         #     images.data = torch.clamp(images.data, 0, 1)
 
         if batchIndex % 100 == 0:
-            msg = 'iter {}, loss gen {:.3f}, loss dist {:.3f}, loss real {:.3f}, loss disc {:.3f}, scale: {:.3f}'.format(
-                batchIndex, lossGen.item(), lossDist.item(), lossRealness.item(), lossDisc.item(), scale.item()
-            )
+            msg = 'iter {} loss dist {:.3f}'.format(batchIndex, lossDist.item())
             print(msg)
 
             def gpu_images_to_numpy(images):
@@ -285,16 +222,13 @@ def main():
 
             # print(discPred.tolist())
             imageBatchFakeCpu = gpu_images_to_numpy(imageBatchFake)
-            imageBatchRealCpu = gpu_images_to_numpy(imageBatchReal)
+            # imageBatchRealCpu = gpu_images_to_numpy(imageBatchReal)
             for i, ax in enumerate(axes.flatten()[:batchSize]):
                 ax.imshow(imageBatchFakeCpu[i])
-            for i, ax in enumerate(axes.flatten()[batchSize:]):
-                ax.imshow(imageBatchRealCpu[i])
             fig.suptitle(msg)
 
             with torch.no_grad():
-                points = np.asarray([pointDataset[i][0] for i in range(200)], dtype=np.float32)
-                images = gpu_images_to_numpy(generator(torch.tensor(points[..., None, None], device=gpu)))
+                images = gpu_images_to_numpy(generator(latents[..., None, None]))
 
                 authorVectorsProj = umap.UMAP(n_neighbors=5, random_state=1337).fit_transform(points)
                 plot_image_scatter(ax2, authorVectorsProj, images, downscaleRatio=2)
@@ -305,9 +239,8 @@ def main():
             plt.close(fig2)
 
             with torch.no_grad():
-                imageNumber = 48
-                points = np.asarray([pointDataset[i][0] for i in range(imageNumber)], dtype=np.float32)
-                imagesGpu = generator(torch.tensor(points[..., None, None], device=gpu))
+                imagesGpu = generator(latents[..., None, None])
+                imageNumber = imagesGpu.shape[0]
 
                 # Compute LPIPS distances, batch to avoid memory issues.
                 bs = 8
@@ -320,17 +253,17 @@ def main():
                         startB, endB = j * bs, (j + 1) * bs
                         imagesB = imagesGpu[startB:endB]
 
-                        distBatch = lossModel.forward(imagesA.repeat(repeats=(bs, 1, 1, 1)).contiguous(),
+                        distTarget = lossModel.forward(imagesA.repeat(repeats=(bs, 1, 1, 1)).contiguous(),
                                                       imagesB.repeat_interleave(repeats=bs, dim=0).contiguous(),
                                                       normalize=True).cpu().numpy()
 
-                        distImages[startA:endA, startB:endB] = distBatch.reshape((bs, bs))
+                        distImages[startA:endA, startB:endB] = distTarget.reshape((bs, bs))
 
                 # Move to the CPU and append an alpha channel for rendering.
                 images = gpu_images_to_numpy(imagesGpu)
                 images = [np.concatenate([im, np.ones(im.shape[:-1] + (1,))], axis=-1) for im in images]
 
-                distPoints = l2_sqr_dist_matrix(torch.tensor(points, dtype=torch.double)).numpy()
+                distPoints = distPointsCpu
                 assert np.abs(distPoints - distPoints.T).max() < 1e-5
                 distPoints = np.minimum(distPoints, distPoints.T)  # Remove rounding errors, guarantee symmetry.
                 config = DistanceMatrixConfig()
@@ -350,7 +283,7 @@ def main():
                                        config)
 
             torch.save(generator.state_dict(), os.path.join(outPath, 'gen_{}.pth'.format(batchIndex)))
-            torch.save(discriminator.state_dict(), os.path.join(outPath, 'disc_{}.pth'.format(batchIndex)))
+            torch.save(discriminator.state_dict(), os.path.join(outPath, 'gen_{}.pth'.format(batchIndex)))
 
 
 if __name__ == '__main__':
