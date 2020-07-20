@@ -115,7 +115,7 @@ def l2_sqr_dist_matrix(x: torch.Tensor) -> torch.Tensor:
 
 def main():
 
-    dataSize = 64
+    dataSize = 8
     batchSize = 8
     # imageSize = 32
     imageSize = 64
@@ -141,6 +141,7 @@ def main():
                            requires_grad=True, dtype=torch.float32, device=gpu)
 
     scale = torch.tensor(2.7, requires_grad=True, dtype=torch.float32, device=gpu)  # todo Re-check!
+    bias = torch.tensor(0.0, requires_grad=True, dtype=torch.float32, device=gpu)  # todo Re-check!
 
     lossModel = models.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True).to(gpu)
     bceLoss = torch.nn.BCELoss()
@@ -160,7 +161,7 @@ def main():
     generator = generator.to(gpu)
 
     # optimizerImages = torch.optim.Adam([images, scale], lr=1e-2, betas=(0.9, 0.999))
-    optimizerScale = torch.optim.Adam([scale], lr=0.001)
+    optimizerScale = torch.optim.Adam([scale, bias], lr=0.001)
     # optimizerGen = torch.optim.Adam(generator.parameters(), lr=0.0002, betas=(0.5, 0.999))
     # optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.9, 0.999))
     # optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
@@ -185,9 +186,16 @@ def main():
         imageBatchFake = generator(latentsBatch[:, :, None, None].float())
 
         # todo It's possible to compute this more efficiently, but would require re-implementing lpips.
-        distPredFlat = lossModel.forward(imageBatchFake.repeat(repeats=(batchSize, 1, 1, 1)).contiguous(),
-                                         imageBatchFake.repeat_interleave(repeats=batchSize, dim=0).contiguous(), normalize=True)
-        distPred = distPredFlat.reshape((batchSize, batchSize))
+        # For now, compute the full BSxBS matrix row-by-row to avoid memory issues.
+        lossDistTotal = torch.tensor(0.0, device=gpu)
+        for iRow in range(batchSize):
+            distPredFlat = lossModel.forward(imageBatchFake[iRow].repeat(repeats=(batchSize, 1, 1, 1)).contiguous(),
+                                             imageBatchFake, normalize=True)
+            distPred = distPredFlat.reshape((1, batchSize))
+            lossDist = torch.sum((distTarget[iRow] - (distPred * scale + bias)) ** 2)  # MSE
+            lossDistTotal += lossDist
+
+        lossDistTotal /= batchSize * batchSize  # Compute the mean.
 
         # print('{} - {} || {} - {}'.format(
         #     torch.min(distPred).item(),
@@ -196,11 +204,10 @@ def main():
         #     torch.max(distTarget).item()
         # ))
 
-        lossDist = torch.sum((distTarget - distPred * scale) ** 2)  # MSE
         # discPred = discriminator(imageBatchFake)
         # lossRealness = bceLoss(discPred, torch.ones(imageBatchFake.shape[0], device=gpu))
         # lossGen = lossDist + 1.0 * lossRealness
-        lossLatents = lossDist
+        lossLatents = lossDistTotal
 
         # optimizerGen.zero_grad()
         # optimizerScale.zero_grad()
@@ -209,10 +216,10 @@ def main():
         # optimizerScale.step()
 
         optimizerLatents.zero_grad()
-        # optimizerScale.zero_grad()
+        optimizerScale.zero_grad()
         lossLatents.backward()
         optimizerLatents.step()
-        # optimizerScale.step()
+        optimizerScale.step()
 
         # with torch.no_grad():
         #     # todo  We're clamping all the images every batch, can we clamp only the ones updated?
@@ -220,7 +227,7 @@ def main():
         #     images.data = torch.clamp(images.data, 0, 1)
 
         if batchIndex % 100 == 0:
-            msg = 'iter {} loss dist {:.3f} scale: {:.3f}'.format(batchIndex, lossDist.item(), scale.item())
+            msg = 'iter {} loss dist {:.3f} scale: {:.3f} bias: {:.3f}'.format(batchIndex, lossDistTotal.item(), scale.item(), bias.item())
             print(msg)
 
             def gpu_images_to_numpy(images):
@@ -239,7 +246,7 @@ def main():
             with torch.no_grad():
                 images = gpu_images_to_numpy(generator(latents[..., None, None]))
 
-                authorVectorsProj = umap.UMAP(n_neighbors=5, random_state=1337).fit_transform(points)
+                authorVectorsProj = umap.UMAP(n_neighbors=min(5, dataSize), random_state=1337).fit_transform(points)
                 plot_image_scatter(ax2, authorVectorsProj, images, downscaleRatio=2)
 
             fig.savefig(os.path.join(outPath, f'batch_{batchIndex}.png'))
@@ -252,7 +259,7 @@ def main():
                 imageNumber = imagesGpu.shape[0]
 
                 # Compute LPIPS distances, batch to avoid memory issues.
-                bs = 8
+                bs = min(imageNumber, 8)
                 assert imageNumber % bs == 0
                 distPredFlat = np.zeros((imagesGpu.shape[0], imagesGpu.shape[0]))
                 for i in range(imageNumber // bs):
@@ -268,6 +275,8 @@ def main():
 
                         distPredFlat[startA:endA, startB:endB] = distTarget.reshape((bs, bs))
 
+                distPredFlat = (distPredFlat * scale.item() + bias.item())
+
                 # Move to the CPU and append an alpha channel for rendering.
                 images = gpu_images_to_numpy(imagesGpu)
                 images = [np.concatenate([im, np.ones(im.shape[:-1] + (1,))], axis=-1) for im in images]
@@ -277,19 +286,33 @@ def main():
                 distPoints = np.minimum(distPoints, distPoints.T)  # Remove rounding errors, guarantee symmetry.
                 config = DistanceMatrixConfig()
                 config.dataRange = (0., 4.)
-                render_distance_matrix(os.path.join(outPath, f'dist_point_{batchIndex}.png'),
-                                       distPoints,
-                                       images,
-                                       config)
+                _, pointIndicesSorted = render_distance_matrix(
+                    os.path.join(outPath, f'dist_point_{batchIndex}.png'),
+                    distPoints,
+                    images,
+                    config=config
+                )
 
                 assert np.abs(distPredFlat - distPredFlat.T).max() < 1e-5
                 distPredFlat = np.minimum(distPredFlat, distPredFlat.T)  # Remove rounding errors, guarantee symmetry.
                 config = DistanceMatrixConfig()
-                config.dataRange = (0., 1.)
-                render_distance_matrix(os.path.join(outPath, f'dist_images_{batchIndex}.png'),
-                                       distPredFlat,
-                                       images,
-                                       config)
+                config.dataRange = (0., 4.)
+                render_distance_matrix(
+                    os.path.join(outPath, f'dist_images_{batchIndex}.png'),
+                    distPredFlat,
+                    images,
+                    config=config
+                )
+
+                config = DistanceMatrixConfig()
+                config.dataRange = (0., 4.)
+                render_distance_matrix(
+                    os.path.join(outPath, f'dist_images_aligned_{batchIndex}.png'),
+                    distPredFlat,
+                    images,
+                    predefinedOrder=pointIndicesSorted,
+                    config=config
+                )
 
             torch.save(generator.state_dict(), os.path.join(outPath, 'gen_{}.pth'.format(batchIndex)))
             torch.save(discriminator.state_dict(), os.path.join(outPath, 'gen_{}.pth'.format(batchIndex)))
