@@ -135,12 +135,12 @@ def main():
 
     # Take top N points.
     points = np.asarray([pointDataset[i][0] for i in range(dataSize)])
-    distPointsCpu = scipy.spatial.distance_matrix(points, points, p=2)
+    distPointsCpu = l2_sqr_dist_matrix(torch.tensor(points)).numpy()
 
     latents = torch.tensor(np.random.normal(0.0, 1.0, (dataSize, nz)),
                            requires_grad=True, dtype=torch.float32, device=gpu)
 
-    scale = torch.tensor(4.0, requires_grad=True, dtype=torch.float32, device=gpu)
+    scale = torch.tensor(2.7, requires_grad=True, dtype=torch.float32, device=gpu)  # todo Re-check!
 
     lossModel = models.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True).to(gpu)
     bceLoss = torch.nn.BCELoss()
@@ -160,7 +160,7 @@ def main():
     generator = generator.to(gpu)
 
     # optimizerImages = torch.optim.Adam([images, scale], lr=1e-2, betas=(0.9, 0.999))
-    # optimizerScale = torch.optim.Adam([scale], lr=0.001)
+    optimizerScale = torch.optim.Adam([scale], lr=0.001)
     # optimizerGen = torch.optim.Adam(generator.parameters(), lr=0.0002, betas=(0.5, 0.999))
     # optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.9, 0.999))
     # optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
@@ -185,9 +185,16 @@ def main():
         imageBatchFake = generator(latentsBatch[:, :, None, None].float())
 
         # todo It's possible to compute this more efficiently, but would require re-implementing lpips.
-        distImages = lossModel.forward(imageBatchFake.repeat(repeats=(batchSize, 1, 1, 1)).contiguous(),
-                                       imageBatchFake.repeat_interleave(repeats=batchSize, dim=0).contiguous(), normalize=True)
-        distPred = distImages.reshape((batchSize, batchSize))
+        distPredFlat = lossModel.forward(imageBatchFake.repeat(repeats=(batchSize, 1, 1, 1)).contiguous(),
+                                         imageBatchFake.repeat_interleave(repeats=batchSize, dim=0).contiguous(), normalize=True)
+        distPred = distPredFlat.reshape((batchSize, batchSize))
+
+        # print('{} - {} || {} - {}'.format(
+        #     torch.min(distPred).item(),
+        #     torch.max(distPred).item(),
+        #     torch.min(distTarget).item(),
+        #     torch.max(distTarget).item()
+        # ))
 
         lossDist = torch.sum((distTarget - distPred * scale) ** 2)  # MSE
         # discPred = discriminator(imageBatchFake)
@@ -202,8 +209,10 @@ def main():
         # optimizerScale.step()
 
         optimizerLatents.zero_grad()
+        # optimizerScale.zero_grad()
         lossLatents.backward()
         optimizerLatents.step()
+        # optimizerScale.step()
 
         # with torch.no_grad():
         #     # todo  We're clamping all the images every batch, can we clamp only the ones updated?
@@ -211,7 +220,7 @@ def main():
         #     images.data = torch.clamp(images.data, 0, 1)
 
         if batchIndex % 100 == 0:
-            msg = 'iter {} loss dist {:.3f}'.format(batchIndex, lossDist.item())
+            msg = 'iter {} loss dist {:.3f} scale: {:.3f}'.format(batchIndex, lossDist.item(), scale.item())
             print(msg)
 
             def gpu_images_to_numpy(images):
@@ -245,7 +254,7 @@ def main():
                 # Compute LPIPS distances, batch to avoid memory issues.
                 bs = 8
                 assert imageNumber % bs == 0
-                distImages = np.zeros((imagesGpu.shape[0], imagesGpu.shape[0]))
+                distPredFlat = np.zeros((imagesGpu.shape[0], imagesGpu.shape[0]))
                 for i in range(imageNumber // bs):
                     startA, endA = i * bs, (i + 1) * bs 
                     imagesA = imagesGpu[startA:endA]
@@ -257,7 +266,7 @@ def main():
                                                       imagesB.repeat_interleave(repeats=bs, dim=0).contiguous(),
                                                       normalize=True).cpu().numpy()
 
-                        distImages[startA:endA, startB:endB] = distTarget.reshape((bs, bs))
+                        distPredFlat[startA:endA, startB:endB] = distTarget.reshape((bs, bs))
 
                 # Move to the CPU and append an alpha channel for rendering.
                 images = gpu_images_to_numpy(imagesGpu)
@@ -273,12 +282,12 @@ def main():
                                        images,
                                        config)
 
-                assert np.abs(distImages - distImages.T).max() < 1e-5
-                distImages = np.minimum(distImages, distImages.T)  # Remove rounding errors, guarantee symmetry.
+                assert np.abs(distPredFlat - distPredFlat.T).max() < 1e-5
+                distPredFlat = np.minimum(distPredFlat, distPredFlat.T)  # Remove rounding errors, guarantee symmetry.
                 config = DistanceMatrixConfig()
                 config.dataRange = (0., 1.)
                 render_distance_matrix(os.path.join(outPath, f'dist_images_{batchIndex}.png'),
-                                       distImages,
+                                       distPredFlat,
                                        images,
                                        config)
 
