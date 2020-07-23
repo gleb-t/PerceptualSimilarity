@@ -17,6 +17,8 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import umap
 from torch.utils.data import Dataset, DataLoader, Sampler
+from torch.utils.tensorboard import SummaryWriter
+
 from PIL import Image
 import skimage.transform
 import matplotlib.pyplot as plt
@@ -115,7 +117,7 @@ def l2_sqr_dist_matrix(x: torch.Tensor) -> torch.Tensor:
 
 def main():
 
-    dataSize = 8
+    dataSize = 128
     batchSize = 8
     # imageSize = 32
     imageSize = 64
@@ -165,7 +167,7 @@ def main():
     # optimizerGen = torch.optim.Adam(generator.parameters(), lr=0.0002, betas=(0.5, 0.999))
     # optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.9, 0.999))
     # optimizerDisc = torch.optim.Adam(discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
-    optimizerLatents = torch.optim.Adam([latents], lr=1e-3, betas=(0.9, 0.999))
+    optimizerLatents = torch.optim.Adam([latents], lr=5e-3, betas=(0.9, 0.999))
 
     fig, axes = plt.subplots(nrows=2, ncols=batchSize // 2)
 
@@ -174,6 +176,8 @@ def main():
 
     outPath = os.path.join('runs', datetime.datetime.today().strftime('%Y_%m_%d_%H_%M_%S'))
     os.makedirs(outPath)
+
+    summaryWriter = SummaryWriter(outPath)
 
     for batchIndex in range(10000):
 
@@ -216,10 +220,10 @@ def main():
         # optimizerScale.step()
 
         optimizerLatents.zero_grad()
-        optimizerScale.zero_grad()
+        # optimizerScale.zero_grad()
         lossLatents.backward()
         optimizerLatents.step()
-        optimizerScale.step()
+        # optimizerScale.step()
 
         # with torch.no_grad():
         #     # todo  We're clamping all the images every batch, can we clamp only the ones updated?
@@ -229,6 +233,8 @@ def main():
         if batchIndex % 100 == 0:
             msg = 'iter {} loss dist {:.3f} scale: {:.3f} bias: {:.3f}'.format(batchIndex, lossDistTotal.item(), scale.item(), bias.item())
             print(msg)
+
+            summaryWriter.add_scalar('loss-dist', lossDistTotal.item(), global_step=batchIndex)
 
             def gpu_images_to_numpy(images):
                 imagesNumpy = images.cpu().data.numpy().transpose(0, 2, 3, 1)
@@ -317,6 +323,7 @@ def main():
             torch.save(generator.state_dict(), os.path.join(outPath, 'gen_{}.pth'.format(batchIndex)))
             torch.save(discriminator.state_dict(), os.path.join(outPath, 'gen_{}.pth'.format(batchIndex)))
 
+    summaryWriter.close()
 
 if __name__ == '__main__':
     main()
