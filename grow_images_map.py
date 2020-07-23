@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 
 from typing import *
 
+import elpips
 from PythonExtras.distance_matrix import render_distance_matrix, DistanceMatrixConfig
 
 
@@ -117,7 +118,7 @@ def l2_sqr_dist_matrix(x: torch.Tensor) -> torch.Tensor:
 
 def main():
 
-    dataSize = 128
+    dataSize = 32
     batchSize = 8
     # imageSize = 32
     imageSize = 64
@@ -145,8 +146,12 @@ def main():
     scale = torch.tensor(2.7, requires_grad=True, dtype=torch.float32, device=gpu)  # todo Re-check!
     bias = torch.tensor(0.0, requires_grad=True, dtype=torch.float32, device=gpu)  # todo Re-check!
 
-    lossModel = models.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True).to(gpu)
-    bceLoss = torch.nn.BCELoss()
+    lpips = models.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True).to(gpu)
+    # lossModel = lpips
+    config = elpips.Config()
+    config.batch_size = 4  # Ensemble size for ELPIPS.
+    config.set_scale_levels_by_image_size(imageSize, imageSize)
+    lossModel = elpips.ElpipsMetric(config, lpips).to(gpu)
 
     discriminator = Discriminator(3, 64, 1)
     if discCheckpointPath:
@@ -193,8 +198,8 @@ def main():
         # For now, compute the full BSxBS matrix row-by-row to avoid memory issues.
         lossDistTotal = torch.tensor(0.0, device=gpu)
         for iRow in range(batchSize):
-            distPredFlat = lossModel.forward(imageBatchFake[iRow].repeat(repeats=(batchSize, 1, 1, 1)).contiguous(),
-                                             imageBatchFake, normalize=True)
+            distPredFlat = lossModel(imageBatchFake[iRow].repeat(repeats=(batchSize, 1, 1, 1)).contiguous(),
+                                     imageBatchFake, normalize=True)
             distPred = distPredFlat.reshape((1, batchSize))
             lossDist = torch.sum((distTarget[iRow] - (distPred * scale + bias)) ** 2)  # MSE
             lossDistTotal += lossDist
@@ -275,9 +280,9 @@ def main():
                         startB, endB = j * bs, (j + 1) * bs
                         imagesB = imagesGpu[startB:endB]
 
-                        distTarget = lossModel.forward(imagesA.repeat(repeats=(bs, 1, 1, 1)).contiguous(),
-                                                      imagesB.repeat_interleave(repeats=bs, dim=0).contiguous(),
-                                                      normalize=True).cpu().numpy()
+                        distTarget = lossModel(imagesA.repeat(repeats=(bs, 1, 1, 1)).contiguous(),
+                                               imagesB.repeat_interleave(repeats=bs, dim=0).contiguous(),
+                                               normalize=True).cpu().numpy()
 
                         distPredFlat[startA:endA, startB:endB] = distTarget.reshape((bs, bs))
 
@@ -299,7 +304,9 @@ def main():
                     config=config
                 )
 
-                assert np.abs(distPredFlat - distPredFlat.T).max() < 1e-5
+                # print(np.abs(distPredFlat - distPredFlat.T).max())
+                # assert np.abs(distPredFlat - distPredFlat.T).max() < 1e-5
+                # todo The symmetry doesn't hold for E-LPIPS, since it's stochastic.
                 distPredFlat = np.minimum(distPredFlat, distPredFlat.T)  # Remove rounding errors, guarantee symmetry.
                 config = DistanceMatrixConfig()
                 config.dataRange = (0., 4.)

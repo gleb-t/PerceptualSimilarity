@@ -3,12 +3,15 @@ Started out as a copy-paste from the E-LPIPS Tensorflow repo.
 """
 import itertools
 import random
+from typing import Any, Optional
 
 import imageio
 import numpy as np
 import torch
 import torch.nn
 import torch.random
+
+from models import PerceptualLoss
 
 
 class Config:
@@ -45,7 +48,7 @@ class Config:
         self.set_scale_levels(max(1, image_size // 64))
 
 
-def sample_ensemble(config):
+def sample_ensemble(config, dev: Optional[torch.device] = None):
     """
     Some of these transformations are defined by sample in the batch,
     but those that can't be applied to tensor slices (resizing, transposition) are shared by the whole batch.
@@ -55,7 +58,7 @@ def sample_ensemble(config):
     n = config.batch_size
 
     # Offset randomization.
-    offset_xy = torch.randint(0, config.offset_max, (n, 2))
+    offset_xy = torch.randint(0, config.offset_max, (n, 2), device=dev)
 
     # Sample scale level.
     cumulative_sum = np.cumsum(config.scale_probabilities)
@@ -64,12 +67,12 @@ def sample_ensemble(config):
     scale_level = max(min(scale_level, config.num_scales), 1)
 
     # Scale randomization.
-    scale_offset_xy = torch.randint(0, scale_level, (2,))
+    scale_offset_xy = torch.randint(0, scale_level, (2,), device=dev)
 
     # Sample flips.
-    flips = torch.arange(0, (n + 3) // 4 * 4, dtype=torch.int32)
+    flips = torch.arange(0, (n + 3) // 4 * 4, dtype=torch.int32, device=dev)
     flips = flips % 4
-    flips = flips[torch.randperm(flips.shape[0])]  # Shuffle.
+    flips = flips[torch.randperm(flips.shape[0], device=dev)]  # Shuffle.
     flips = flips[:n]
 
     # Sample transposing.
@@ -78,11 +81,11 @@ def sample_ensemble(config):
 
     # Color multiplication.
     def sample_colors() -> torch.Tensor:
-        color = torch.rand((n,), dtype=config.dtype)
-        color += torch.arange(0, n, dtype=config.dtype)
+        color = torch.rand((n,), dtype=config.dtype, device=dev)
+        color += torch.arange(0, n, dtype=config.dtype, device=dev)
         color /= n
 
-        return color[torch.randperm(n)]  # Shuffle.
+        return color[torch.randperm(n, device=dev)]  # Shuffle.
     colors_r = sample_colors().view((-1, 1, 1, 1))
     colors_g = sample_colors().view((-1, 1, 1, 1))
     colors_b = sample_colors().view((-1, 1, 1, 1))
@@ -99,11 +102,11 @@ def sample_ensemble(config):
     # Sample permutations.
     permutations = np.asarray(list(itertools.permutations(range(3))), dtype=np.int32)
     repeat_count = (n + len(permutations) - 1) // len(permutations)
-    permutations = torch.tensor(permutations).repeat((repeat_count, 1))
-    permutations = permutations[torch.randperm(permutations.shape[0])][:n, :].flatten()
+    permutations = torch.tensor(permutations, device=dev).repeat((repeat_count, 1))
+    permutations = permutations[torch.randperm(permutations.shape[0], device=dev)][:n, :].flatten()
     # I'm not sure why we needed that second dim there, but I'm staying close to the TF code for now.
 
-    base_indices = 3 * torch.arange(0, n).unsqueeze(1).repeat((1, 3)).flatten()  # [0, 0, 0, 3, 3, 3, 6, 6, 6, ...]
+    base_indices = 3 * torch.arange(0, n, device=dev).unsqueeze(1).repeat((1, 3)).flatten()  # [0, 0, 0, 3, 3, 3, 6, 6, 6, ...]
     permutations += base_indices
 
     return offset_xy, flips, swap_xy, color_factors, permutations, scale_offset_xy, scale_level
@@ -204,30 +207,69 @@ def apply_ensemble(config, sampled_ensemble_params, X):
     return X
 
 
+class ElpipsMetric(torch.nn.Module):
+
+    def __init__(self, config: Config, lpipsMetric: PerceptualLoss):
+        super().__init__()
+        self.config = config
+        self.lpips = lpipsMetric
+
+    def forward(self, imagesLeft: torch.Tensor, imagesRight: torch.Tensor, normalize: bool = True):
+        """
+        Mimic the batch interface of LPIPS, even though we evaluate distances one-by-one.
+        Makes this ELPIPS implementation a drop-in replacement.
+        """
+        assert len(imagesLeft.shape) == len(imagesRight.shape) == 4
+        assert imagesLeft.shape[0] == imagesRight.shape[0]
+
+        imageNum = imagesLeft.shape[0]
+        losses = []
+        for i in range(imageNum):
+            losses.append(self.compute_single(imagesLeft[i], imagesRight[i], normalize=True))
+
+        return torch.stack(losses, dim=0)
+
+    def compute_single(self, imageLeft: torch.Tensor, imageRight: torch.Tensor, normalize: bool = True):
+        assert len(imageLeft.shape) == len(imageRight.shape) == 3
+
+        ensembleParams = sample_ensemble(self.config, dev=imageLeft.device)
+
+        batchLeft = imageLeft.unsqueeze(0).repeat((self.config.batch_size, 1, 1, 1))
+        batchRight = imageRight.unsqueeze(0).repeat((self.config.batch_size, 1, 1, 1))
+
+        batchLeft = apply_ensemble(self.config, ensembleParams, batchLeft)
+        batchRight = apply_ensemble(self.config, ensembleParams, batchRight)
+
+        lpipsLosses = self.lpips(batchLeft, batchRight, normalize=normalize)
+
+        return torch.mean(lpipsLosses)
+
+
 if __name__ == '__main__':
-    config = Config()
-    config.batch_size = 10
+    def main():
+        config = Config()
+        config.batch_size = 10
 
-    imagePath = r'E:\data\cat-vs-dog\cat\cat.1.jpg'
-    imageData = imageio.imread(imagePath)[np.newaxis, :, :, :3].transpose(0, 3, 1, 2).astype(np.float32) / 255.0
+        imagePath = r'E:\data\cat-vs-dog\cat\cat.1.jpg'
+        imageData = imageio.imread(imagePath)[np.newaxis, :, :, :3].transpose(0, 3, 1, 2).astype(np.float32) / 255.0
 
-    config.set_scale_levels_by_image_size(imageData.shape[2], imageData.shape[3])
+        config.set_scale_levels_by_image_size(imageData.shape[2], imageData.shape[3])
 
-    imageBatch = torch.tensor(imageData).repeat((config.batch_size, 1, 1, 1))
+        imageBatch = torch.tensor(imageData).repeat((config.batch_size, 1, 1, 1))
 
-    ensembleParams = sample_ensemble(config)
-    offset_xy, flips, swap_xy, color_factors, permutations, scale_offset_xy, scale_level = ensembleParams
+        ensembleParams = sample_ensemble(config)
+        offset_xy, flips, swap_xy, color_factors, permutations, scale_offset_xy, scale_level = ensembleParams
 
-    imageBatchTransformed = apply_ensemble(config, ensembleParams, imageBatch)
+        imageBatchTransformed = apply_ensemble(config, ensembleParams, imageBatch)
 
-    print(offset_xy)
-    print(imageBatchTransformed.shape)
+        print(offset_xy)
+        print(imageBatchTransformed.shape)
 
-    import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(ncols=config.batch_size)
-    for i, ax in enumerate(axes):
-        ax.imshow(imageBatchTransformed[i].numpy().transpose(1, 2, 0))
+        import matplotlib.pyplot as plt
+        fig, axes = plt.subplots(ncols=config.batch_size)
+        for i, ax in enumerate(axes):
+            ax.imshow(imageBatchTransformed[i].numpy().transpose(1, 2, 0))
 
-    plt.show()
+        plt.show()
 
-    pass
+    main()
