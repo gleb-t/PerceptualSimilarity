@@ -197,14 +197,18 @@ def main():
         # todo It's possible to compute this more efficiently, but would require re-implementing lpips.
         # For now, compute the full BSxBS matrix row-by-row to avoid memory issues.
         lossDistTotal = torch.tensor(0.0, device=gpu)
+        distanceRows = []
         for iRow in range(batchSize):
             distPredFlat = lossModel(imageBatchFake[iRow].repeat(repeats=(batchSize, 1, 1, 1)).contiguous(),
                                      imageBatchFake, normalize=True)
             distPred = distPredFlat.reshape((1, batchSize))
+            distanceRows.append(distPred)
             lossDist = torch.sum((distTarget[iRow] - (distPred * scale + bias)) ** 2)  # MSE
             lossDistTotal += lossDist
 
         lossDistTotal /= batchSize * batchSize  # Compute the mean.
+
+        distPredFull = torch.cat(distanceRows, dim=0)
 
         # print('{} - {} || {} - {}'.format(
         #     torch.min(distPred).item(),
@@ -272,7 +276,7 @@ def main():
                 # Compute LPIPS distances, batch to avoid memory issues.
                 bs = min(imageNumber, 8)
                 assert imageNumber % bs == 0
-                distPredFlat = np.zeros((imagesGpu.shape[0], imagesGpu.shape[0]))
+                distPredEval = np.zeros((imagesGpu.shape[0], imagesGpu.shape[0]))
                 for i in range(imageNumber // bs):
                     startA, endA = i * bs, (i + 1) * bs 
                     imagesA = imagesGpu[startA:endA]
@@ -280,13 +284,13 @@ def main():
                         startB, endB = j * bs, (j + 1) * bs
                         imagesB = imagesGpu[startB:endB]
 
-                        distTarget = lossModel(imagesA.repeat(repeats=(bs, 1, 1, 1)).contiguous(),
-                                               imagesB.repeat_interleave(repeats=bs, dim=0).contiguous(),
-                                               normalize=True).cpu().numpy()
+                        distBatchEval = lossModel(imagesA.repeat(repeats=(bs, 1, 1, 1)).contiguous(),
+                                                  imagesB.repeat_interleave(repeats=bs, dim=0).contiguous(),
+                                                  normalize=True).cpu().numpy()
 
-                        distPredFlat[startA:endA, startB:endB] = distTarget.reshape((bs, bs))
+                        distPredEval[startA:endA, startB:endB] = distBatchEval.reshape((bs, bs))
 
-                distPredFlat = (distPredFlat * scale.item() + bias.item())
+                distPredEval = (distPredEval * scale.item() + bias.item())
 
                 # Move to the CPU and append an alpha channel for rendering.
                 images = gpu_images_to_numpy(imagesGpu)
@@ -307,12 +311,12 @@ def main():
                 # print(np.abs(distPredFlat - distPredFlat.T).max())
                 # assert np.abs(distPredFlat - distPredFlat.T).max() < 1e-5
                 # todo The symmetry doesn't hold for E-LPIPS, since it's stochastic.
-                distPredFlat = np.minimum(distPredFlat, distPredFlat.T)  # Remove rounding errors, guarantee symmetry.
+                distPredEval = np.minimum(distPredEval, distPredEval.T)  # Remove rounding errors, guarantee symmetry.
                 config = DistanceMatrixConfig()
                 config.dataRange = (0., 4.)
                 render_distance_matrix(
                     os.path.join(outPath, f'dist_images_{batchIndex}.png'),
-                    distPredFlat,
+                    distPredEval,
                     images,
                     config=config
                 )
@@ -321,16 +325,23 @@ def main():
                 config.dataRange = (0., 4.)
                 render_distance_matrix(
                     os.path.join(outPath, f'dist_images_aligned_{batchIndex}.png'),
-                    distPredFlat,
+                    distPredEval,
                     images,
                     predefinedOrder=pointIndicesSorted,
                     config=config
                 )
 
+                fig, axes = plt.subplots(ncols=2)
+                axes[0].matshow(distTarget.cpu().numpy(), vmin=0, vmax=4)
+                axes[1].matshow(distPredFull.cpu().numpy() * scale.item(), vmin=0, vmax=4)
+                fig.savefig(os.path.join(outPath, f'batch_dist_{batchIndex}.png'))
+                plt.close(fig)
+
             torch.save(generator.state_dict(), os.path.join(outPath, 'gen_{}.pth'.format(batchIndex)))
             torch.save(discriminator.state_dict(), os.path.join(outPath, 'gen_{}.pth'.format(batchIndex)))
 
     summaryWriter.close()
+
 
 if __name__ == '__main__':
     main()
