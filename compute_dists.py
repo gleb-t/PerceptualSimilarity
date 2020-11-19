@@ -1,4 +1,6 @@
 import argparse
+
+import elpips
 import models
 from util import util
 
@@ -11,6 +13,10 @@ opt = parser.parse_args()
 
 ## Initializing the model
 model = models.PerceptualLoss(model='net-lin',net='alex',use_gpu=opt.use_gpu)
+config = elpips.Config()
+config.batch_size = 4
+config.set_scale_levels_by_image_size(64, 64)
+model = elpips.ElpipsMetric(config, model)
 
 # Load images
 img0 = util.im2tensor(util.load_image(opt.path0)) # RGB image from [-1,1]
