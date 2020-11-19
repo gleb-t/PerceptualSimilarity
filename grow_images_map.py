@@ -5,6 +5,8 @@ import os
 import random
 import glob
 import json
+from typing import *
+
 import scipy
 import imageio
 import scipy.misc
@@ -23,7 +25,6 @@ from PIL import Image
 import skimage.transform
 import matplotlib.pyplot as plt
 
-from typing import *
 
 import elpips
 from PythonExtras.distance_matrix import render_distance_matrix, DistanceMatrixConfig
@@ -120,6 +121,7 @@ def main():
 
     dataSize = 32
     batchSize = 8
+    elpipsBatchSize = 1
     # imageSize = 32
     imageSize = 64
     nz = 100
@@ -149,7 +151,7 @@ def main():
     lpips = models.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True).to(gpu)
     # lossModel = lpips
     config = elpips.Config()
-    config.batch_size = 4  # Ensemble size for ELPIPS.
+    config.batch_size = elpipsBatchSize  # Ensemble size for ELPIPS.
     config.set_scale_levels_by_image_size(imageSize, imageSize)
     lossModel = elpips.ElpipsMetric(config, lpips).to(gpu)
 
@@ -254,8 +256,8 @@ def main():
             # print(discPred.tolist())
             imageBatchFakeCpu = gpu_images_to_numpy(imageBatchFake)
             # imageBatchRealCpu = gpu_images_to_numpy(imageBatchReal)
-            for i, ax in enumerate(axes.flatten()[:batchSize]):
-                ax.imshow(imageBatchFakeCpu[i])
+            for iCol, ax in enumerate(axes.flatten()[:batchSize]):
+                ax.imshow(imageBatchFakeCpu[iCol])
             fig.suptitle(msg)
 
             with torch.no_grad():
@@ -277,8 +279,8 @@ def main():
                 bs = min(imageNumber, 8)
                 assert imageNumber % bs == 0
                 distPredEval = np.zeros((imagesGpu.shape[0], imagesGpu.shape[0]))
-                for i in range(imageNumber // bs):
-                    startA, endA = i * bs, (i + 1) * bs 
+                for iCol in range(imageNumber // bs):
+                    startA, endA = iCol * bs, (iCol + 1) * bs
                     imagesA = imagesGpu[startA:endA]
                     for j in range(imageNumber // bs):
                         startB, endB = j * bs, (j + 1) * bs
@@ -335,6 +337,26 @@ def main():
                 axes[0].matshow(distTarget.cpu().numpy(), vmin=0, vmax=4)
                 axes[1].matshow(distPredFull.cpu().numpy() * scale.item(), vmin=0, vmax=4)
                 fig.savefig(os.path.join(outPath, f'batch_dist_{batchIndex}.png'))
+                plt.close(fig)
+
+                surveySize = 30
+                fig, axes = plt.subplots(nrows=3, ncols=surveySize, figsize=(surveySize, 3))
+                assert len(images) == dataSize
+                allIndices = list(range(dataSize))
+                with open(os.path.join(outPath, f'survey_{batchIndex}.txt'), 'w') as file:
+                    for iCol in range(surveySize):
+                        randomIndices = random.sample(allIndices, k=3)
+                        leftToMid = distPointsCpu[randomIndices[0], randomIndices[1]]
+                        rightToMid = distPointsCpu[randomIndices[2], randomIndices[1]]
+
+                        correctAnswer = 'left' if leftToMid < rightToMid else 'right'
+                        file.write("{}\t{}\t{}\t{}\t{}\n".format(iCol, correctAnswer, leftToMid, rightToMid,
+                                                                 str(tuple(randomIndices))))
+
+                        for iRow in (0, 1, 2):
+                            axes[iRow][iCol].imshow(images[randomIndices[iRow]])
+
+                fig.savefig(os.path.join(outPath, f'survey_{batchIndex}.png'))
                 plt.close(fig)
 
             torch.save(generator.state_dict(), os.path.join(outPath, 'gen_{}.pth'.format(batchIndex)))
